@@ -105,6 +105,76 @@ impl<E: Numeric> TmaTileArgLaunch<E> {
         let view = ViewArg::new_tensor_map_tiled::<TmaStoredLayout>(tensor_map, layout);
         Self::new(view, TileSpec::direct(axes))
     }
+
+    /// A storage-tiled operand's tensor map whose box lands whole rows
+    /// (`cubek::std::launch::tma::tma_operand_in_tiles`), over two `axes`: `dims` is its logical
+    /// `(rows, cols)` and `tile` its storage tile, both counted in values. Over a packed operand,
+    /// `field` is what its words hold, `field.per_word()` values a word along `cols`.
+    pub fn tensor_map_in_tiles(
+        tensor_map: TensorMapArg<Tiled>,
+        axes: &[Axis],
+        dims: (u32, u32),
+        tile: (u32, u32),
+        field: Option<Field>,
+    ) -> Self {
+        assert_eq!(
+            axes.len(),
+            2,
+            "TmaTileArg: a storage-tiled descriptor is a matrix; batch it by launching per batch"
+        );
+        let layout = TmaInTilesLayoutLaunch::new(dims, tile);
+        let view = ViewArg::new_tensor_map_tiled::<TmaInTilesLayout>(tensor_map, layout);
+        let spec = TileSpec::direct(axes);
+        let spec = match field {
+            Some(field) => spec.packed(field),
+            None => spec,
+        };
+        Self::new(view, spec)
+    }
+}
+
+/// In-kernel tensor-map layout for a descriptor over `[R/tr, tr, C/tc, tc]` whose box lands whole
+/// rows: a logical `(row, col)` is the tile it sits in, `(row/tr, col/tc)`, at the tile's first row
+/// and column, a box's origin being tile-aligned.
+#[derive(CubeType, CubeLaunch, Clone)]
+pub(crate) struct TmaInTilesLayout {
+    /// Logical `(rows, cols)` of the operand.
+    dims: (u32, u32),
+    /// The storage tile `(rows, cols)`.
+    tile: (u32, u32),
+}
+
+#[cube]
+impl Layout for TmaInTilesLayout {
+    type Coordinates = CoordsDyn;
+    type SourceCoordinates = CoordsDyn;
+
+    fn to_source_pos(&self, pos: Self::Coordinates) -> Self::SourceCoordinates {
+        let (tile_rows, tile_cols) = self.tile;
+        let mut src = CoordsDyn::new();
+        src.push(pos[0] / tile_rows);
+        src.push(0u32);
+        src.push(pos[1] / tile_cols);
+        src.push(0u32);
+        src
+    }
+
+    fn to_source_pos_checked(&self, pos: Self::Coordinates) -> (Self::SourceCoordinates, bool) {
+        // TMA loads are clamped by the descriptor; no in-kernel bounds check.
+        (self.to_source_pos(pos), true)
+    }
+
+    fn shape(&self) -> Self::Coordinates {
+        let (rows, cols) = self.dims;
+        let mut s = CoordsDyn::new();
+        s.push(rows);
+        s.push(cols);
+        s
+    }
+
+    fn is_in_bounds(&self, _pos: Self::Coordinates) -> bool {
+        true
+    }
 }
 
 /// In-kernel tensor-map layout splitting a logical `(row, col)` into storage-tile coordinates.
