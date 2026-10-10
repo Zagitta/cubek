@@ -181,6 +181,50 @@ pub fn tma_operand_tiled(
     }
 }
 
+/// A storage-tiled operand's tensor map whose box lands whole rows: the descriptor is the operand
+/// as `[R/tr, tr, C/tc, tc]`, the tiles' rows nested inside the tiles' columns, and a box of
+/// `box_shape`, whole tiles both ways, lands the box's rows one after another, each a run of its
+/// tiles' rows, as a row-major operand's box would land them. `binding` states that order: its
+/// dims `(R/tr, tr, C/tc, tc)` at the strides the tiles lie at.
+///
+/// # Panics
+///
+/// A binding of another rank, whose innermost dim does not step by one, or a box that is not whole
+/// tiles: a box cutting a tile would land part of its rows.
+pub fn tma_operand_in_tiles(
+    binding: TensorBinding,
+    box_shape: (usize, usize),
+    storage_ty: ElemType,
+    swizzle: TensorMapSwizzle,
+) -> TensorMapArg<Tiled> {
+    assert_eq!(
+        binding.shape.len(),
+        4,
+        "tma_operand_in_tiles: the binding states (R/tr, tr, C/tc, tc)"
+    );
+    assert_eq!(
+        binding.strides[3], 1,
+        "tma_operand_in_tiles: a tile's row is one contiguous run"
+    );
+    let tile = (binding.shape[1], binding.shape[3]);
+    let (box_rows, box_cols) = box_shape;
+    assert!(
+        box_rows.is_multiple_of(tile.0) && box_cols.is_multiple_of(tile.1),
+        "tma_operand_in_tiles: a box of {box_shape:?} is not whole {tile:?} tiles"
+    );
+    let meta = tma_meta_tiled(
+        Metadata::new(binding.shape.clone(), binding.strides.clone()),
+        shape![box_rows / tile.0, tile.0, box_cols / tile.1, tile.1],
+        remap_storage_for_tma(storage_ty),
+        swizzle,
+    );
+    TensorMapArg {
+        tensor: binding.into_tensor_arg(),
+        metadata: meta,
+        _kind: PhantomData,
+    }
+}
+
 /// Build a tiled [`TensorMapMeta`] with the defaults shared by every current call site
 /// (no interleave, no prefetch, OOB-fill = zero, elem_stride = `[1; rank]`).
 pub fn tma_meta_tiled(
