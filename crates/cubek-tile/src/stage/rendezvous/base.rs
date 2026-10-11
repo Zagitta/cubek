@@ -175,11 +175,15 @@ impl Meeting {
         // Bound before the match, which borrows the kind.
         let space = comptime!(dst.place.space.clone());
         let decodes = src.decodes();
-        if comptime!(decodes) {
+        if comptime!(crate::experiment::fill_nothing()) {
+            // Experiment only: the stage keeps whatever it held.
+        } else if comptime!(decodes) {
             dst.copy_from(src);
         } else {
             self.fill_as_it_lies(dst, src, space);
-            dst.fill_scales_from(src, self);
+            if comptime!(!crate::experiment::scales_unfilled()) {
+                dst.fill_scales_from(src, self);
+            }
         }
     }
 

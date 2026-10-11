@@ -2,6 +2,7 @@
 //! whose loops hand out [`Region`]s; the [`Launcher`] reads the grid off the same levels.
 
 pub(crate) mod algebra;
+pub(crate) mod experiment;
 mod comptime_only;
 pub mod launch;
 pub mod layout;

@@ -737,7 +737,10 @@ fn load_block_scaled<T: Numeric, NV: Size, NS: Size>(
     let served = def.scales_index(unit, ident);
     let factor = src.innermost_factor();
     let packed_scales = factor.holds_words();
-    if comptime!(packed_scales) {
+    if comptime!(crate::experiment::scales_constant()) {
+        // Experiment only: four `e4m3` ones, read from nowhere.
+        scales[0] = Vector::<e4m3, NS>::reinterpret(0x3838_3838u32.runtime());
+    } else if comptime!(packed_scales) {
         // The step's four scales as the operand stores them: one word, the register itself.
         comptime!(assert!(
             k / E2M1_SCALE_BLOCK == 4,
