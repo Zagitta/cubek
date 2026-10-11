@@ -114,7 +114,6 @@ impl<E: Numeric> TmaTileArgLaunch<E> {
         Self::new(view, TileSpec::direct(axes).packed(field))
     }
 
-    /// The view of a storage-tiled descriptor over `axes`.
     fn stored_view(
         tensor_map: TensorMapArg<Tiled>,
         axes: &[Axis],
