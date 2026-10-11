@@ -32,8 +32,8 @@ fn copy_per_unit<E: Numeric>(
     #[comptime] rank: usize,
     #[define(E)] _dtype: ElemType,
 ) {
-    let input = input.tile(comptime!(space.clone()));
-    let output = output.tile(comptime!(space.clone()));
+    let input = input.tile(&space);
+    let output = output.tile(&space);
     for cube in space {
         let input = input.at(&cube);
         let output = output.at(&cube);
