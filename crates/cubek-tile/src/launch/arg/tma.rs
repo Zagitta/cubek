@@ -106,6 +106,21 @@ impl<E: Numeric> TmaTileArgLaunch<E> {
         Self::new(view, TileSpec::direct(axes))
     }
 
+    /// Experiment: [`tensor_map_stored`](Self::tensor_map_stored) over a packed operand whose box
+    /// is any number of whole tiles, `dims` and `tile` counted in values.
+    pub fn tensor_map_stored_packed(
+        tensor_map: TensorMapArg<Tiled>,
+        axes: &[Axis],
+        dims: (u32, u32),
+        tile: (u32, u32),
+        field: Field,
+    ) -> Self {
+        assert_eq!(axes.len(), 2, "TmaTileArg: a storage-tiled descriptor is a matrix");
+        let layout = TmaStoredLayoutLaunch::new(dims, tile);
+        let view = ViewArg::new_tensor_map_tiled::<TmaStoredLayout>(tensor_map, layout);
+        Self::new(view, TileSpec::direct(axes).packed(field))
+    }
+
     /// A storage-tiled operand's tensor map whose box lands whole rows
     /// (`cubek::std::launch::tma::tma_operand_in_tiles`), over two `axes`: `dims` is its logical
     /// `(rows, cols)` and `tile` its storage tile, both counted in values. Over a packed operand,

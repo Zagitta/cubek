@@ -27,3 +27,9 @@ pub(crate) fn scales_unfilled() -> bool {
 pub(crate) fn fill_nothing() -> bool {
     set("CUBEK_EXP_FILL_NOTHING")
 }
+
+/// `CUBEK_EXP_COMPUTE_NOTHING`: the block-scaled instruction is not issued; what is left is the
+/// stages' fill and the synchronization around it, the copy pipeline alone.
+pub(crate) fn compute_nothing() -> bool {
+    set("CUBEK_EXP_COMPUTE_NOTHING")
+}

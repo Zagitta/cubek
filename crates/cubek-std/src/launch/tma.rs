@@ -199,6 +199,37 @@ pub fn tma_operand_in_tiles(
     }
 }
 
+/// Experiment: a tensor map whose box lands whole blocks one after another, `binding` stating
+/// the operand as `(R/tr, C/tc, tr, tc)` at whatever strides its values lie at, the box
+/// `box_shape` of whole `(tr, tc)` blocks: lands `[R_box/tr][C_box/tc][tr][tc]`, each block's rows
+/// one after another.
+pub fn tma_operand_in_blocks(
+    binding: TensorBinding,
+    box_shape: (usize, usize),
+    storage_ty: ElemType,
+    swizzle: TensorMapSwizzle,
+) -> TensorMapArg<Tiled> {
+    assert_eq!(binding.shape.len(), 4, "tma_operand_in_blocks: (R/tr, C/tc, tr, tc)");
+    assert_eq!(binding.strides[3], 1, "tma_operand_in_blocks: a block's row is one run");
+    let block = (binding.shape[2], binding.shape[3]);
+    let (box_rows, box_cols) = box_shape;
+    assert!(
+        box_rows.is_multiple_of(block.0) && box_cols.is_multiple_of(block.1),
+        "tma_operand_in_blocks: a box of {box_shape:?} is not whole {block:?} blocks"
+    );
+    let meta = tma_meta_tiled(
+        Metadata::new(binding.shape.clone(), binding.strides.clone()),
+        shape![box_rows / block.0, box_cols / block.1, block.0, block.1],
+        remap_storage_for_tma(storage_ty),
+        swizzle,
+    );
+    TensorMapArg {
+        tensor: binding.into_tensor_arg(),
+        metadata: meta,
+        _kind: PhantomData,
+    }
+}
+
 /// Build a tiled [`TensorMapMeta`] with the defaults shared by every current call site
 /// (no interleave, no prefetch, OOB-fill = zero, elem_stride = `[1; rank]`).
 pub fn tma_meta_tiled(

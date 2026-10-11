@@ -101,6 +101,47 @@ impl StageStorage {
         Ok(swizzle)
     }
 
+    /// Experiment: the swizzle a descriptor landing this storage's blocks whole, one after
+    /// another in the storage's order, lands their rows with: the swizzle of a block's row, every
+    /// block a whole number of the swizzle's period of rows.
+    ///
+    /// # Errors
+    ///
+    /// Rows no descriptor lands, or blocks of a number of rows the period does not divide.
+    pub fn tma_block_swizzle(
+        &self,
+        space: &Space,
+        vector_size: usize,
+        elem_bits: usize,
+    ) -> Result<TensorMapSwizzle, Refusal> {
+        let form = StageForm::dense(
+            space,
+            vector_size,
+            self.clone(),
+            LineBytes(vector_size * elem_bits / 8),
+        );
+        let swizzle = form
+            .rows
+            .tma_swizzle()
+            .map_err(|why| Refusal::RowsNoDescriptorLands { why })?;
+        let rank = space.rank();
+        let period = match swizzle {
+            TensorMapSwizzle::None => 1,
+            _ => ChunkSwizzle::ROWS_PER_PERIOD,
+        };
+        for block in self.nesting(space) {
+            let rows = block.extent_at(rank - 2);
+            if !rows.is_multiple_of(period) {
+                return Err(Refusal::BoxSplitsStageBlocks {
+                    axis: space.axis_at(rank - 1),
+                    rows,
+                    period,
+                });
+            }
+        }
+        Ok(swizzle)
+    }
+
     /// The storage-tiling nesting a stage over `space` gets, coarse to fine; empty is row-major.
     pub(crate) fn nesting(&self, space: &Space) -> Vec<Space> {
         match self {

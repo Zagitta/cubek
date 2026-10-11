@@ -855,11 +855,13 @@ pub(crate) fn mma_execute_block_scaled<A: Numeric>(
     #[comptime] n: usize,
     #[comptime] k: usize,
 ) {
-    let def = block_scaled_definition::<A>(m, n, k);
-    let out = def.execute_scaled(lhs, rhs, &*acc, lhs_scales[0], rhs_scales[0]);
-    let num = def.vectors_per_lane(MatrixIdent::Accumulator);
-    #[unroll]
-    for i in 0..num {
-        acc[i] = out[i];
+    if comptime!(!crate::experiment::compute_nothing()) {
+        let def = block_scaled_definition::<A>(m, n, k);
+        let out = def.execute_scaled(lhs, rhs, &*acc, lhs_scales[0], rhs_scales[0]);
+        let num = def.vectors_per_lane(MatrixIdent::Accumulator);
+        #[unroll]
+        for i in 0..num {
+            acc[i] = out[i];
+        }
     }
 }
