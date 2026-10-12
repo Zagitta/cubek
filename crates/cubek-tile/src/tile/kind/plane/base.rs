@@ -786,8 +786,14 @@ impl<T: Numeric> PlanePartition<T> {
                 .map(|axis| src.place.space.extent(axis))
                 .product::<usize>()
         );
+        // A 16-bit operand meets a block-scaled fragment only on the block-scaled instruction,
+        // whose `k` no 16-bit instruction reads at once: it is rounded as it loads.
         let block_scaled = match comptime!(form) {
-            Instruction::Mma { .. } => block_scales_here(src, m, n, k),
+            Instruction::Mma { .. } => {
+                let stored = block_scales_here(src, m, n, k);
+                let rounded = rounds_into_block_scaled(src, m, n, k);
+                comptime!(stored || rounded)
+            }
             Instruction::Cmma | Instruction::Registers { .. } | Instruction::Wgmma => {
                 comptime!(false)
             }

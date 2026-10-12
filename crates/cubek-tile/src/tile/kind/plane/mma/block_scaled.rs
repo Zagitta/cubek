@@ -8,6 +8,7 @@ use cubecl::{
     ir::{ElemType, FloatKind},
     prelude::*,
     quant::scheme::QuantValue,
+    std::quant::fp4::float_to_e2m1_bits,
     std::tensor::layout::CoordsDyn,
 };
 
@@ -102,8 +103,34 @@ pub(crate) fn contracts_block_scaled<L: Numeric, R: Numeric>(
     #[comptime] k: usize,
 ) -> comptime_type!(bool) {
     let lhs_scaled = block_scales_here(lhs, m, n, k);
+    let lhs_rounded = rounds_into_block_scaled(lhs, m, n, k);
     let rhs_scaled = block_scales_here(rhs, m, n, k);
-    comptime!(lhs_scaled && rhs_scaled)
+    comptime!((lhs_scaled || lhs_rounded) && rhs_scaled)
+}
+
+/// Whether `src`, an `A` of 16-bit floats in a shared window, is rounded to NVFP4 as it loads
+/// into the device's block-scaled instruction of `m × n × k` ([`quantize_block_scaled`]): plain
+/// values carrying no scales, against a `B` the instruction reads as NVFP4. Where a block-scaled
+/// instruction contracts an operand the caller hands over in 16 bits, the caller has chosen the
+/// 4-bit product, and rounding the operand is the only way the instruction reads it.
+#[cube]
+pub(crate) fn rounds_into_block_scaled<T: Numeric>(
+    src: &Tile<T>,
+    #[comptime] m: usize,
+    #[comptime] n: usize,
+    #[comptime] k: usize,
+) -> comptime_type!(bool) {
+    let packing = src.packing();
+    let plain = comptime!(packing == Packing::Plain);
+    let shared = src.is_shared();
+    let unscaled = src.factor_levels();
+    // An element's size read at expansion, where the launch has registered it: inside
+    // `comptime!` the call would size the generic placeholder instead.
+    let elem_size = T::size().comptime();
+    let sixteen_bits = comptime!(elem_size == 2);
+    let blocks = comptime!(k.is_multiple_of(E2M1_SCALE_BLOCK));
+    let offered = offers_block_scaled(m, n, k);
+    comptime!(plain && shared && unscaled == 0 && sixteen_bits && blocks && offered)
 }
 
 /// Whether the device offers the block-scaled instruction of `m × n × k` over `e2m1` operands
@@ -149,6 +176,25 @@ fn offers_block_scaled(
 /// into the register; scales stored one to a value are read and narrowed one at a time.
 #[cube]
 pub(crate) fn load_block_scaled<T: Numeric, NV: Size, NS: Size>(
+    src: &Tile<T>,
+    values: &mut Array<Vector<e2m1x2, NV>>,
+    scales: &mut Array<Vector<e4m3, NS>>,
+    #[comptime] ident: MatrixIdent,
+    #[comptime] layout: MatrixLayout,
+    #[comptime] io: MmaIo,
+    #[comptime] shape: (usize, usize, usize),
+) {
+    let packing = src.packing();
+    if comptime!(packing == Packing::Plain) {
+        quantize_block_scaled(src, values, scales, ident, layout, shape);
+    } else {
+        load_block_scaled_words(src, values, scales, ident, layout, io, shape);
+    }
+}
+
+/// [`load_block_scaled`] of a source holding the stored words and their scales.
+#[cube]
+fn load_block_scaled_words<T: Numeric, NV: Size, NS: Size>(
     src: &Tile<T>,
     values: &mut Array<Vector<e2m1x2, NV>>,
     scales: &mut Array<Vector<e4m3, NS>>,
@@ -254,6 +300,102 @@ pub(crate) fn load_block_scaled<T: Numeric, NV: Size, NS: Size>(
         }
         scales[0] = register;
     }
+}
+
+/// The largest magnitude an `e2m1` value holds: a block's scale maps the block's largest onto it.
+const E2M1_MAX: f32 = 6.0;
+
+/// Load an `A` of 16-bit floats rounded to NVFP4: each register's run of eight values along `k`
+/// under the scale its block of [`E2M1_SCALE_BLOCK`] takes, the block's largest magnitude over
+/// [`E2M1_MAX`] rounded to `e4m3`, with no per-tensor factor above it; the values over the
+/// rounded scale, rounded to the nearest `e2m1`, ties to the even code. The scale register gathers the four scales of the row it
+/// serves from the units holding them.
+///
+/// The instruction's `A` lays each row's sixteen values of a block across two neighbouring units
+/// of a quad, eight each, the first two blocks of `k` in its first registers of the row and the
+/// last two in its second, the row eight below in between: a block's largest is one shuffle
+/// away, and a served row's scales four. A scale wider than `e4m3` holds saturates at its
+/// largest, 448, so a block whose largest passes `448 × 6` clips.
+#[cube]
+fn quantize_block_scaled<T: Numeric, NV: Size, NS: Size>(
+    src: &Tile<T>,
+    values: &mut Array<Vector<e2m1x2, NV>>,
+    scales: &mut Array<Vector<e4m3, NS>>,
+    #[comptime] ident: MatrixIdent,
+    #[comptime] layout: MatrixLayout,
+    #[comptime] shape: (usize, usize, usize),
+) {
+    comptime!(assert!(
+        ident == MatrixIdent::A && layout == MatrixLayout::RowMajor,
+        "MmaData::load_block_scaled: a 16-bit operand is rounded to NVFP4 as an `A` lying along \
+         its rows, its values running along `k`"
+    ));
+    let (m, n, k) = comptime!(shape);
+    comptime!(assert!(
+        k / E2M1_SCALE_BLOCK == 4,
+        "MmaData::load_block_scaled: a rounded `A`'s scale register holds four blocks, and this \
+         step reads {}",
+        k / E2M1_SCALE_BLOCK
+    ));
+    let def = block_scaled_definition::<f32>(m, n, k);
+    let unit = UNIT_POS_PLANE;
+    // An `e2m1x2` holds two values: a register's run is twice its cells.
+    let per_register = def.vector_size(ident);
+    let registers = def.vectors_per_lane(ident);
+    let run = comptime!(per_register * 2);
+    let served = src.vector_size();
+    let size!(W) = served;
+    let width = comptime!(served);
+    let (rows, cols) = comptime!((m, k));
+    let view = src.fragment_matrix_packed::<W>(rows, cols);
+    // Each register's block largest, met with the unit beside it holding the block's other half.
+    let mut largest = Array::<f32>::new(registers);
+    #[unroll]
+    for i in 0..registers {
+        let (row, col) = def.position_of_nth(unit, comptime!((i * run) as u32), ident);
+        let mut run_values = Array::<f32>::new(run);
+        let mut most = 0.0f32;
+        #[unroll]
+        for l in 0..comptime!(run.div_ceil(width)) {
+            let line = view.read((row, col / comptime!(width as u32) + comptime!(l as u32)));
+            #[unroll]
+            for e in 0..comptime!(width.min(run)) {
+                let value = f32::cast_from(line.extract(e));
+                run_values[comptime!(l * width + e)] = value;
+                most = max(most, value.abs());
+            }
+        }
+        let block = max(most, plane_shuffle_xor(most, 1u32));
+        largest[i] = block;
+        let scale = f32::cast_from(e4m3::cast_from(block / E2M1_MAX));
+        // A block of zeros rounds its scale to zero; its values are zeros under any.
+        let inverse = select(scale > 0.0, 1.0 / scale, 0.0);
+        // Eight codes to the register's word, the first value's in the low bits, as a stored
+        // word holds them.
+        let mut word = 0u32;
+        #[unroll]
+        for v in 0..run {
+            let over = Vector::<f32, Const<1>>::new(run_values[v] * inverse);
+            let code = float_to_e2m1_bits::<f32, Const<1>>(over).extract(0usize);
+            word |= code << comptime!((4 * v) as u32);
+        }
+        values[i] = Vector::<e2m1x2, NV>::reinterpret(word);
+    }
+    // The row this unit's scale register serves, the row eight below for its odd units: its four
+    // blocks' largest held by the quad's first and third units, in the registers of that row.
+    let served = def.scales_index(unit, ident);
+    let upper = served >= 8u32;
+    let quad = unit / 4u32 * 4u32;
+    let mut register = Vector::<e4m3, NS>::empty();
+    #[unroll]
+    for b in 0..comptime!(k / E2M1_SCALE_BLOCK) {
+        let holder = quad + comptime!((2 * (b % 2)) as u32);
+        let low = plane_shuffle(largest[comptime!((b / 2) * 2)], holder);
+        let high = plane_shuffle(largest[comptime!((b / 2) * 2 + 1)], holder);
+        let block = select(upper, high, low);
+        register.insert(b, e4m3::cast_from(block / E2M1_MAX));
+    }
+    scales[0] = register;
 }
 
 /// The words of a block-scaled fragment in one `ldmatrix`: the instruction's registers lie as a
