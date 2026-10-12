@@ -168,7 +168,6 @@ pub fn tma_operand_tiled(
          which steps ({}, 1); this one steps {inner:?}",
         tile.1
     );
-    let (box_rows, box_cols) = box_shape;
     let (metadata, box_dims) = match landing {
         TmaLanding::Tiles => {
             assert_eq!(
@@ -188,6 +187,7 @@ pub fn tma_operand_tiled(
                 rank, 4,
                 "tma_operand_tiled: a box landing in rows is over (R/tr, C/tc, tr, tc), unbatched"
             );
+            let (box_rows, box_cols) = box_shape;
             assert!(
                 box_rows.is_multiple_of(tile.0) && box_cols.is_multiple_of(tile.1),
                 "tma_operand_tiled: a box of {box_shape:?} is not whole {tile:?} tiles"

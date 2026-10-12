@@ -682,30 +682,30 @@ impl<T: Numeric> Memory<T> {
 
                 origin.push(from.plus(moved.cast::<i32>()));
                 extent.push(comptime!(edge as u32).runtime());
-                let layout = comptime!(self.layout.projection.clone());
+                let projection = comptime!(self.layout.projection.clone());
                 let coordinate = comptime!(Axis(p as u8));
-                // A stored-tiled coordinate is not linear in its offset: within a window that
-                // spans several stored tiles, a step that crosses into the next one lands at
-                // that tile's stride, so the advance is between the two coordinates' offsets.
-                let advance = if comptime!(layout.carriers(coordinate).len() > 1) {
+                let shape = &self.layout.physical_shape;
+                let strides = &self.layout.physical_strides;
+                // Over a storage-tiled axis the offset is not linear in the coordinate: a step
+                // into the next stored tile lands at that tile's stride, so the advance is the
+                // difference of the two offsets.
+                let advance = if comptime!(projection.carriers(coordinate).len() > 1) {
                     let from = from.cast::<u32>();
-                    let shape = &self.layout.physical_shape;
-                    let strides = &self.layout.physical_strides;
                     axis_offset(
-                        comptime!(layout.clone()),
+                        comptime!(projection.clone()),
                         coordinate,
                         from.plus(moved),
                         shape,
                         strides,
                     )
-                    .minus(axis_offset(layout, coordinate, from, shape, strides))
+                    .minus(axis_offset(projection, coordinate, from, shape, strides))
                 } else {
                     index.cast::<u32>().times(axis_offset(
-                        layout,
+                        projection,
                         coordinate,
                         comptime!(edge as u32).runtime(),
-                        &self.layout.physical_shape,
-                        &self.layout.physical_strides,
+                        shape,
+                        strides,
                     ))
                 };
                 advances.push(advance);
