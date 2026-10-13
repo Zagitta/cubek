@@ -8,7 +8,6 @@ use cubecl::{
     ir::{ElemType, FloatKind},
     prelude::*,
     quant::scheme::QuantValue,
-    std::quant::fp4::float_to_e2m1_bits,
     std::tensor::layout::CoordsDyn,
 };
 
@@ -308,7 +307,7 @@ const E2M1_MAX: f32 = 6.0;
 /// Load an `A` of 16-bit floats rounded to NVFP4: each register's run of eight values along `k`
 /// under the scale its block of [`E2M1_SCALE_BLOCK`] takes, the block's largest magnitude over
 /// [`E2M1_MAX`] rounded to `e4m3`, with no per-tensor factor above it; the values over the
-/// rounded scale, rounded to the nearest `e2m1`, ties to the even code. The scale register gathers the four scales of the row it
+/// rounded scale, in `f16`, rounded to the nearest `e2m1` by the device's conversion. The scale register gathers the four scales of the row it
 /// serves from the units holding them.
 ///
 /// The instruction's `A` lays each row's sixteen values of a block across two neighbouring units
@@ -371,13 +370,21 @@ fn quantize_block_scaled<T: Numeric, NV: Size, NS: Size>(
         // A block of zeros rounds its scale to zero; its values are zeros under any.
         let inverse = select(scale > 0.0, 1.0 / scale, 0.0);
         // Eight codes to the register's word, the first value's in the low bits, as a stored
-        // word holds them.
+        // word holds them: each pair rounded by the device's conversion into one byte.
         let mut word = 0u32;
         #[unroll]
-        for v in 0..run {
-            let over = Vector::<f32, Const<1>>::new(run_values[v] * inverse);
-            let code = float_to_e2m1_bits::<f32, Const<1>>(over).extract(0usize);
-            word |= code << comptime!((4 * v) as u32);
+        for p in 0..per_register {
+            let mut pair = Vector::<half::f16, Const<2>>::empty();
+            pair.insert(
+                0usize,
+                half::f16::cast_from(run_values[comptime!(2 * p)] * inverse),
+            );
+            pair.insert(
+                1usize,
+                half::f16::cast_from(run_values[comptime!(2 * p + 1)] * inverse),
+            );
+            let byte = u8::reinterpret(e2m1x2::cast_from(pair));
+            word |= u32::cast_from(byte) << comptime!((8 * p) as u32);
         }
         values[i] = Vector::<e2m1x2, NV>::reinterpret(word);
     }
