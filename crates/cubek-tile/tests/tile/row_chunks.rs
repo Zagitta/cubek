@@ -323,6 +323,15 @@ fn check(case: Case) {
         .enforce();
         return;
     }
+    // A `{m, k}` lhs or a `{n, k}` rhs runs its lines along `K`, and an instruction shallower than
+    // a line would start a step inside one, which the descent refuses: an `f16` mma 8 deep.
+    if (!lhs_transposed || transposed) && edge_k < v {
+        TestOutcome::Validated(ValidationResult::Skipped(format!(
+            "a {v}-wide line runs past the {edge_k}-deep instruction along K"
+        )))
+        .enforce();
+        return;
+    }
     assert!(
         stage_k.is_multiple_of(edge_k),
         "{case:?}: a stage {stage_k} deep is not whole {edge_k}-deep steps"
