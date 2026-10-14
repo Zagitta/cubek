@@ -96,9 +96,11 @@ impl<'a, E: Numeric> LastArrival<'a, E> {
         self.own.clone()
     }
 
-    /// Hand `sum`, opened on [`tile`](LastArrival::tile), on to `out` with a cast: drained straight
-    /// into it where this run holds the box whole, parked and merged by the last run to arrive
-    /// otherwise. Every unit of the cube reaches it.
+    /// Hand `sum` on to `out` with a cast: drained straight into it where this run holds the box
+    /// whole, parked and merged by the last run to arrive otherwise. Every unit of the cube reaches
+    /// it. `sum` is an accumulator opened on [`tile`](LastArrival::tile), or a box of memory the
+    /// cube's planes have already met in and the cube has synchronized on, which is copied where an
+    /// accumulator drains.
     pub fn hand_on<O: Numeric>(&self, sum: &Tile<E>, out: &mut Tile<O>) {
         let slot = self.own.projection();
         let output = out.projection();
@@ -110,9 +112,9 @@ impl<'a, E: Numeric> LastArrival<'a, E> {
             output.logical_axes()
         ));
         if self.holders == 1 {
-            sum.drained_into(&out.at(&self.region));
+            handed_into::<E, O>(sum, &out.at(&self.region));
         } else {
-            sum.drained_into(&self.tile());
+            handed_into::<E, E>(sum, &self.tile());
             // The part lands at device scope before the run counts itself in.
             sync_storage();
             let mut arrived = Shared::<[u32]>::new_slice(1usize);
@@ -139,6 +141,18 @@ impl<'a, E: Numeric> LastArrival<'a, E> {
                 }
             }
         }
+    }
+}
+
+/// `sum` into `dest`: drained where it is a plane's accumulator, copied where it is a box of memory.
+#[cube]
+fn handed_into<E: Numeric, O: Numeric>(sum: &Tile<E>, dest: &Tile<O>) {
+    let in_memory = sum.is_memory();
+    if comptime!(in_memory) {
+        let mut dest = dest.clone();
+        dest.copy_cast_from(sum);
+    } else {
+        sum.drained_into(dest);
     }
 }
 
