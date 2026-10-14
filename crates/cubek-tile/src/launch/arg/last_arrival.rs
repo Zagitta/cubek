@@ -16,9 +16,9 @@ use crate::*;
 /// parts are added in the order of their runs, so the total is the same bits whichever run arrives
 /// last.
 ///
-/// The slots are one operand over the output's axes, in its order, of two boxes a run
-/// ([`Partitioning::arrival_slots`]): the first holds the part of the box the run starts in, the
-/// second the part of the box it ends in. A run's other boxes are its own whole, so no part needs a
+/// The slots are one operand over the output's axes, in its order, of two boxes a run, stacked
+/// along the first of them the cube level cuts ([`Partitioning::arrival_slots`]): the first holds
+/// the part of the box the run starts in, the second the part of the box it ends in. A run's other boxes are its own whole, so no part needs a
 /// third. The counters are one `u32` a box ([`Partitioning::arrival_counters`]), holding zero, and
 /// left holding zero. A count publishes the run's part at device scope first, so it runs only where
 /// the runtime hands one cube's writes to another within a dispatch (`device_memory_scope`).
@@ -168,22 +168,30 @@ impl Partitioning {
     }
 
     /// The shape of a [`LastArrival`]'s slots for an output over `axes`, in that order: two cube
-    /// boxes a run of the shared cube level, stacked along the first of `axes`.
+    /// boxes a run of the shared cube level, stacked along the first of `axes` the cube level
+    /// cuts.
     pub fn arrival_slots(&self, axes: &[Axis]) -> cubecl::zspace::Shape {
         let boxes = self.arrival_slots_space(axes);
         cubecl::zspace::Shape::from(axes.iter().map(|&axis| boxes.space().extent(axis)))
     }
 
     /// The space the slots of a [`LastArrival`] for an output over `axes` are boxes of, cut by
-    /// these levels: one cube box, with the first of `axes` two boxes a run long. Every axis the
-    /// cube level cuts, a batch one included, is one box long, so the slot boxes are counted along
-    /// that first axis alone.
+    /// these levels: one cube box, with the first of `axes` the cube level cuts two boxes a run
+    /// long. Every axis the cube level cuts, a batch one included, is one box long, so the slot
+    /// boxes are counted along that axis alone; an axis it does not cut is the cube box's whole,
+    /// so a box along it would be every slot at once.
     fn arrival_slots_space(&self, axes: &[Axis]) -> Partitioning {
         let level = &self.levels()[0];
         let runs = level.shared_by().expect(
             "LastArrival: the cube level distributes no grid as one index; say `shared_by`",
         );
-        let stacked = axes[0];
+        let stacked = axes
+            .iter()
+            .copied()
+            .find(|&axis| level.tile(axis).is_some())
+            .unwrap_or_else(|| {
+                panic!("LastArrival: the cube level cuts none of the output's axes {axes:?}")
+            });
         let cube_box = level.child(self.space());
         let Extent::Static(edge) = cube_box.extent_raw(stacked) else {
             panic!(
