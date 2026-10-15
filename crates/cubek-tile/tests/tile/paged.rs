@@ -307,6 +307,26 @@ fn run_paged_read_table(
     block: usize,
     from: u32,
 ) -> HostData {
+    run_paged_read_bound(lens, shape, entries, block, from, Reach::Own)
+}
+
+/// How a read states its table's reach ([`Arg::paged`](cubek_tile::launch::Arg::paged) or
+/// [`Arg::paged_covering`](cubek_tile::launch::Arg::paged_covering)).
+#[derive(Clone, Copy, Debug)]
+enum Reach {
+    Own,
+    Launch,
+}
+
+/// [`run_paged_read_table`], the pool bound as `reach` says.
+fn run_paged_read_bound(
+    lens: &[u32; SEQUENCES],
+    shape: &[usize],
+    entries: Vec<u32>,
+    block: usize,
+    from: u32,
+    reach: Reach,
+) -> HostData {
     let client = cubecl::test_device().client();
     let f32_ty = f32::elem_type_native();
     let u32_ty = u32::elem_type_native();
@@ -345,12 +365,13 @@ fn run_paged_read_table(
         .custom(vec![-1.0; SEQUENCES * FEATURES_READ])
         .generate_without_host_data();
 
-    let pool = launcher
-        .arg(pool_handle.binding())
-        .axes(&[B, S, F])
-        .paged(B, S)
-        .build()
-        .unwrap();
+    let pool = launcher.arg(pool_handle.binding()).axes(&[B, S, F]);
+    let pool = match reach {
+        Reach::Own => pool.paged(B, S),
+        Reach::Launch => pool.paged_covering(B, S),
+    }
+    .build()
+    .unwrap();
 
     paged_read_sum_kernel::launch(
         &client,
@@ -489,6 +510,35 @@ fn a_paged_read_past_the_table_reads_zero() {
                     got.get_f32(&[b, f]),
                     *cell,
                     "sequence {b} feature {f} through {pages:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A table stated to cover the launch reads as one checked against its own shape, wherever the
+/// launch keeps its reads in bounds: steps that cross pages, lengths ending inside a page.
+#[test]
+fn a_covering_table_reads_as_a_checked_one() {
+    let entries: Vec<u32> = PAGES.iter().flatten().copied().collect();
+    for lens in [[5, 6, 1], [6, 3, 4]] {
+        let read = |reach| {
+            run_paged_read_bound(
+                &lens,
+                &[SEQUENCES, PAGES_EACH],
+                entries.clone(),
+                READ_BLOCK,
+                0,
+                reach,
+            )
+        };
+        let (own, covering) = (read(Reach::Own), read(Reach::Launch));
+        for b in 0..SEQUENCES {
+            for f in 0..FEATURES_READ {
+                assert_eq!(
+                    covering.get_f32(&[b, f]),
+                    own.get_f32(&[b, f]),
+                    "sequence {b} feature {f} at lengths {lens:?}"
                 );
             }
         }
