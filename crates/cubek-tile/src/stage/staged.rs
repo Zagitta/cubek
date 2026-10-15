@@ -160,21 +160,24 @@ impl Memory {
                         &operand.runtime_map(),
                         operand.window_signed(),
                         operand.window_boundaries(),
+                        owner,
                     )
                 }
             }
             StageElement::Stored => {
                 comptime!(refuse_for_a_plane(owner, "kept in its stored form"));
-                Memory::smem_stored(operand, level, storage)
+                Memory::smem_stored(operand, level, storage, owner)
             }
         }
     }
 
-    /// [`stage`](Memory::stage) in the element the operand is stored in.
+    /// [`stage`](Memory::stage) in the element the operand is stored in, for the cube `owner`
+    /// names, whose units fill it.
     fn smem_stored(
         operand: &Tile,
         #[comptime] level: Level,
         #[comptime] storage: StageStorage,
+        #[comptime] owner: StageOwner,
     ) -> Tile {
         let _served = naming::<Served>(operand.element);
         let space = comptime!(level.child(&operand.place.space));
@@ -194,7 +197,11 @@ impl Memory {
             }
         };
         match comptime!(packing) {
-            Packing::Plain => Memory::smem::<Served>(space, vector_size, storage, units),
+            Packing::Plain => {
+                // The values the bulk engine lands come packed; a plain stored stage keeps the
+                // copy's alignment.
+                Memory::smem_owned::<Served>(space, vector_size, storage, units, 0usize, owner)
+            }
             packing => Memory::smem_packed::<Served>(
                 space,
                 vector_size,
@@ -202,6 +209,7 @@ impl Memory {
                 units,
                 packing,
                 alignment,
+                owner,
             ),
         }
     }
@@ -211,7 +219,7 @@ impl Memory {
 /// served values is laid out one copy per plane.
 fn refuse_for_a_plane(owner: StageOwner, form: &str) {
     assert!(
-        owner == StageOwner::Cube,
+        matches!(owner, StageOwner::Cube { .. }),
         "Memory::stage: this walk hands each plane a stage of its own, which is laid out only for \
          a plain shared-memory stage of served values, and this one is {form}; stage the operand \
          plain, or walk it from the cube"

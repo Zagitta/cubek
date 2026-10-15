@@ -141,12 +141,13 @@ impl Meeting {
         }
     }
 
-    /// Units that arrive on `full`.
+    /// Units that arrive on `full`: the filling planes' where the cube sets planes aside, since
+    /// they alone fill, whatever share of the fill is cooperative.
     pub(crate) fn producers(#[comptime] collective_full: bool, #[comptime] fillers: usize) -> u32 {
-        if comptime!(collective_full) {
-            CUBE_DIM
-        } else if comptime!(fillers > 0) {
+        if comptime!(fillers > 0) {
             comptime!(fillers as u32) * CUBE_DIM_X
+        } else if comptime!(collective_full) {
+            CUBE_DIM
         } else {
             1u32.runtime()
         }
@@ -216,7 +217,7 @@ mod tests {
             Rendezvous::for_deliveries(
                 &[Delivery::Procedural, Delivery::SyncPerUnit],
                 0,
-                StageOwner::Cube
+                StageOwner::CUBE
             ),
             Rendezvous::Cube
         );
@@ -225,7 +226,7 @@ mod tests {
     #[test]
     fn procedural_and_tma_share_a_barrier_pipeline() {
         assert_eq!(
-            Rendezvous::for_deliveries(&[Delivery::Procedural, Delivery::Tma], 0, StageOwner::Cube),
+            Rendezvous::for_deliveries(&[Delivery::Procedural, Delivery::Tma], 0, StageOwner::CUBE),
             Rendezvous::Barrier
         );
         assert!(Rendezvous::collective_full(&[
@@ -240,7 +241,7 @@ mod tests {
     fn an_async_copy_rendezvouses_on_a_barrier_every_unit_commits_to() {
         let deliveries = [Delivery::AsyncPerUnit];
         assert_eq!(
-            Rendezvous::for_deliveries(&deliveries, 0, StageOwner::Cube),
+            Rendezvous::for_deliveries(&deliveries, 0, StageOwner::CUBE),
             Rendezvous::Barrier
         );
         assert!(Rendezvous::collective_full(&deliveries));
@@ -257,7 +258,7 @@ mod tests {
     fn a_bulk_copy_keeps_its_single_producer_arrival() {
         let deliveries = [Delivery::AsyncBulk];
         assert_eq!(
-            Rendezvous::for_deliveries(&deliveries, 0, StageOwner::Cube),
+            Rendezvous::for_deliveries(&deliveries, 0, StageOwner::CUBE),
             Rendezvous::Barrier
         );
         assert!(!Rendezvous::collective_full(&deliveries));
@@ -288,7 +289,7 @@ mod tests {
     #[test]
     fn a_filled_slot_rendezvouses_on_a_barrier_whatever_delivered_it() {
         assert_eq!(
-            Rendezvous::for_deliveries(&[Delivery::SyncPerUnit], 1, StageOwner::Cube),
+            Rendezvous::for_deliveries(&[Delivery::SyncPerUnit], 1, StageOwner::CUBE),
             Rendezvous::Barrier
         );
     }

@@ -220,8 +220,9 @@ pub(crate) struct Access {
     pub delivery: Delivery,
 }
 
-/// The units that share a cooperative fill of a window: every unit of the cube, or the units of
-/// one plane, for a stage that plane owns and fills alone ([`Stages::smem`](crate::Stages::smem)).
+/// The units that share a cooperative fill of a window: every unit of the cube, the units of the
+/// planes the cube sets aside to fill its stages, or the units of one plane, for a stage that
+/// plane owns and fills alone ([`Stages::smem`](crate::Stages::smem)).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct FillUnits {
     /// Whose units they are: the cube's, or one plane's.
@@ -229,6 +230,9 @@ pub(crate) struct FillUnits {
     /// How many there are, `0` when unknown: a stage filled from this tile emits its fill
     /// straight-line when it knows. The launch's cube size, or one plane's width.
     pub count: usize,
+    /// The planes at the end of the cube set aside to fill its stages, whose units alone share
+    /// the fill of a cube's stage; `0` where every unit of the cube does.
+    pub fillers: usize,
 }
 
 impl FillUnits {
@@ -237,6 +241,18 @@ impl FillUnits {
         FillUnits {
             scope: ComputeScope::Cube,
             count,
+            fillers: 0,
+        }
+    }
+
+    /// The units of the `fillers` planes at the end of the cube set aside to fill its stages
+    /// ([`Level::fillers`](crate::Level::fillers)), how many unknown: the launch states the
+    /// cube's units, not the plane's width.
+    pub(crate) fn filling_planes(fillers: usize) -> Self {
+        FillUnits {
+            scope: ComputeScope::Cube,
+            count: 0,
+            fillers,
         }
     }
 
@@ -247,6 +263,7 @@ impl FillUnits {
             true => FillUnits {
                 scope: holder,
                 count: 0,
+                fillers: 0,
             },
             false => self,
         }
@@ -256,21 +273,28 @@ impl FillUnits {
 #[cube]
 impl FillUnits {
     /// This unit's position among the units `fill` names, which a cooperative fill takes its
-    /// lines at: its position in the cube, or in its plane.
+    /// lines at: its position in the cube, among the filling planes' units, or in its plane.
     ///
     /// A plane is the launch's `x` ([`Partitioning::cube_dim`]), so a unit's position in its plane
-    /// is `UNIT_POS_X` and the plane's width `CUBE_DIM_X`.
+    /// is `UNIT_POS_X` and the plane's width `CUBE_DIM_X`; the filling planes are the cube's last.
     pub(crate) fn worker(#[comptime] fill: FillUnits) -> usize {
         comptime!(assert!(
             fill.scope != ComputeScope::Unit,
             "FillUnits::worker: a cooperative fill is shared by a cube or a plane, never one unit"
         ));
-        ComputeScope::unit(comptime!(fill.scope))
+        if comptime!(fill.fillers > 0) {
+            (UNIT_POS - (CUBE_DIM - comptime!(fill.fillers as u32) * CUBE_DIM_X)) as usize
+        } else {
+            ComputeScope::unit(comptime!(fill.scope))
+        }
     }
 
-    /// How many units `fill` names at runtime: the cube's, or one plane's
+    /// How many units `fill` names at runtime: the cube's, the filling planes', or one plane's
     /// ([`worker`](FillUnits::worker)).
     pub(crate) fn workers(#[comptime] fill: FillUnits) -> usize {
+        if comptime!(fill.fillers > 0) {
+            return comptime!(fill.fillers) * CUBE_DIM_X as usize;
+        }
         match comptime!(fill.scope) {
             ComputeScope::Cube => CUBE_DIM as usize,
             ComputeScope::Plane => CUBE_DIM_X as usize,

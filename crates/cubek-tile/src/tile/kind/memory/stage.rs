@@ -12,22 +12,27 @@ use crate::*;
 /// that hands each plane a region of its own is that plane's, and so are the stages it fills.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum StageOwner {
-    /// One stage for the cube, filled by every unit of it.
-    Cube,
+    /// One stage for the cube, filled by the `fillers` planes it sets aside to fill its stages,
+    /// or by every unit of it where it sets none aside.
+    Cube { fillers: usize },
     /// One stage for each of the cube's `planes` planes, laid side by side in one allocation,
     /// each filled by its own plane's units and read by nobody else.
     Plane { planes: usize },
 }
 
 impl StageOwner {
-    /// The owner of a stage run by `scope` in a cube of `planes` planes.
+    /// One stage for the cube, filled by every unit of it.
+    pub(crate) const CUBE: Self = StageOwner::Cube { fillers: 0 };
+
+    /// The owner of a stage run by `scope` in a cube of `planes` planes, `fillers` of which the
+    /// walk sets aside to fill its stages.
     ///
     /// # Panics
     ///
     /// A unit's scope: a stage is filled cooperatively, and one unit has nobody to fill it with.
-    pub(crate) fn new(scope: ComputeScope, planes: usize) -> Self {
+    pub(crate) fn new(scope: ComputeScope, planes: usize, fillers: usize) -> Self {
         match scope {
-            ComputeScope::Cube => StageOwner::Cube,
+            ComputeScope::Cube => StageOwner::Cube { fillers },
             ComputeScope::Plane => StageOwner::Plane { planes },
             ComputeScope::PlaneGroup { .. } => panic!(
                 "StageOwner: this walk hands each plane group a region of its own, and a stage \
@@ -41,17 +46,19 @@ impl StageOwner {
     }
 
     /// The units that fill one copy of the stage, where the cube holds `cube_units` (`0` when
-    /// unknown): all of them, or one plane's share. A share that is not a whole count is
-    /// unknown, which a fill walks rolled.
+    /// unknown): all of them, the filling planes', or one plane's share. A share that is not a
+    /// whole count is unknown, which a fill walks rolled.
     pub(crate) fn fill(self, cube_units: usize) -> FillUnits {
         match self {
-            StageOwner::Cube => FillUnits::cube(cube_units),
+            StageOwner::Cube { fillers: 0 } => FillUnits::cube(cube_units),
+            StageOwner::Cube { fillers } => FillUnits::filling_planes(fillers),
             StageOwner::Plane { planes } => FillUnits {
                 scope: ComputeScope::Plane,
                 count: match cube_units.is_multiple_of(planes) {
                     true => cube_units / planes,
                     false => 0,
                 },
+                fillers: 0,
             },
         }
     }
@@ -73,7 +80,7 @@ impl Memory {
             storage,
             units,
             comptime!(0usize),
-            comptime!(StageOwner::Cube),
+            comptime!(StageOwner::CUBE),
         )
     }
 
@@ -111,7 +118,8 @@ impl Memory {
     }
 
     /// [`smem`](Memory::smem) for a gathered operand: the compacted physical window its sub-tile
-    /// reads ([`Compaction`]), still addressed by the operand's own [`Projection`].
+    /// reads ([`Compaction`]), still addressed by the operand's own [`Projection`], filled by the
+    /// units of the cube `owner` names.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn smem_gathered<T: Numeric>(
         #[comptime] space: Space,
@@ -122,6 +130,7 @@ impl Memory {
         map: &RuntimeMap,
         #[comptime] signed: bool,
         #[comptime] boundaries: SmallVec<[Option<Boundary>; Space::MAX_RANK]>,
+        #[comptime] owner: StageOwner,
     ) -> Tile {
         let form = comptime!(StageForm::gathered(
             &space,
@@ -152,7 +161,7 @@ impl Memory {
             stage_map,
             ComptimeOption::new_Some(source),
             comptime!(0usize),
-            comptime!(StageOwner::Cube),
+            comptime!(owner),
         )
     }
 
@@ -175,7 +184,7 @@ impl Memory {
         let size!(W) = vector_size;
         let cells = comptime!(form.cells());
         let smem = match comptime!(owner) {
-            StageOwner::Cube => {
+            StageOwner::Cube { .. } => {
                 if comptime!(alignment > 0) {
                     Shared::<[Vector<T, W>]>::new_aligned_slice(cells, alignment)
                 } else {
@@ -219,6 +228,7 @@ impl Memory {
         #[comptime] units: usize,
         #[comptime] packing: Packing,
         #[comptime] alignment: usize,
+        #[comptime] owner: StageOwner,
     ) -> Tile {
         let alignment = comptime!(alignment.max(RowChunks::CHUNK_BYTES));
         let word_bytes = u32::size().comptime();
@@ -235,7 +245,7 @@ impl Memory {
         Memory::smem_over::<T, _, _>(
             space,
             vector_size,
-            comptime!(FillUnits::cube(units)),
+            comptime!(owner.fill(units)),
             &smem,
             comptime!(packing),
             form,
@@ -858,7 +868,17 @@ mod tests {
         assert_eq!(plane.fill(0).count, 0);
         assert_eq!(plane.fill(130).count, 0);
         assert_eq!(plane.fill(128).scope, ComputeScope::Plane);
-        assert_eq!(StageOwner::Cube.fill(128), FillUnits::cube(128));
+        assert_eq!(StageOwner::CUBE.fill(128), FillUnits::cube(128));
+    }
+
+    /// A cube's stage under planes set aside is filled by their units alone, the planes at the
+    /// end of the cube, so the planes contracting never take a share of its fill.
+    #[test]
+    fn a_cube_setting_planes_aside_fills_with_their_units() {
+        let fill = StageOwner::Cube { fillers: 1 }.fill(160);
+        assert_eq!(fill, FillUnits::filling_planes(1));
+        assert_eq!(fill.scope, ComputeScope::Cube);
+        assert_eq!(fill.count, 0);
     }
 
     /// Every plane's copy starts on the buffer's alignment: a copy of lines shorter than it is

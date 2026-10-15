@@ -38,9 +38,9 @@ pub(crate) struct StagePlan {
 }
 
 impl StagePlan {
-    /// Plan the operands a walk of `level` over `op_space` stages for `owner`.
-    ///
-    /// Panics if the walk sets planes aside to fill a cooperatively filled operand.
+    /// Plan the operands a walk of `level` over `op_space` stages for `owner`. Where the walk
+    /// sets planes aside to fill, they alone fill every operand, its cooperative share too
+    /// ([`StageOwner::fill`]).
     pub(crate) fn new(
         operands: &[StageOperand],
         op_space: &Space,
@@ -53,11 +53,6 @@ impl StagePlan {
         let collective_full = Rendezvous::collective_full(&deliveries);
         let commits = Rendezvous::commits(&deliveries);
         let fences = Rendezvous::fences(&deliveries);
-        assert!(
-            fillers == 0 || !collective_full,
-            "Slot: a slot that mixes a cooperative fill with a bulk copy cannot be filled by \
-             a subset of the cube, and this walk sets {fillers} plane(s) aside to fill it"
-        );
         // A barrier slot arrives `full` once per fill, so fixing one operand would break parity.
         let can_fix_invariants = op_space.is_static() && sync != Rendezvous::Barrier;
         let refills = operands
@@ -160,7 +155,7 @@ mod tests {
             ],
             &space,
             &level,
-            StageOwner::Cube,
+            StageOwner::CUBE,
         );
         for slot in 0..2 {
             assert_eq!(plan.refills(slot)[0], Refill::EveryRegion);
@@ -178,7 +173,7 @@ mod tests {
             ],
             &space,
             &level,
-            StageOwner::Cube,
+            StageOwner::CUBE,
         );
         assert_eq!(plan.refills(0)[0], Refill::Once);
         assert_eq!(plan.refills(1)[0], Refill::Shared);
@@ -196,28 +191,33 @@ mod tests {
             &[operand(Delivery::Tma, &lhs), operand(Delivery::Tma, &rhs)],
             &space,
             &level,
-            StageOwner::Cube,
+            StageOwner::CUBE,
         );
         assert_eq!(plan.fillers(), 2);
     }
 
+    /// Planes set aside fill a slot an operand of which their units copy, beside a bulk copy of
+    /// the other: an NVFP4 operand's scale words, copied beside the values the TMA engine lands.
+    /// Every one of their units publishes, on a barrier.
     #[test]
-    #[should_panic(expected = "cannot be filled by a subset of the cube")]
-    fn a_walk_cannot_set_planes_aside_to_fill_a_slot_it_also_fills_cooperatively() {
+    fn planes_set_aside_fill_a_slot_they_also_copy_into() {
         let (space, lhs, rhs) = spaces();
         let level = Levels::leaf(&[(M, 8), (N, 8), (K, 4)])
             .walk_every(&[M, N, K])
             .filled_by(1)
             .level();
-        StagePlan::new(
+        let plan = StagePlan::new(
             &[
                 operand(Delivery::Tma, &lhs),
                 operand(Delivery::SyncPerUnit, &rhs),
             ],
             &space,
             &level,
-            StageOwner::Cube,
+            StageOwner::Cube { fillers: 1 },
         );
+        assert_eq!(plan.fillers(), 1);
+        assert_eq!(plan.sync(), Rendezvous::Barrier);
+        assert!(plan.collective_full());
     }
 
     #[test]
@@ -228,7 +228,7 @@ mod tests {
             &[operand(Delivery::Tma, &lhs), operand(Delivery::Tma, &rhs)],
             &space,
             &level,
-            StageOwner::Cube,
+            StageOwner::CUBE,
         );
         assert_eq!(plan.refills(0)[0], Refill::EveryRegion);
     }

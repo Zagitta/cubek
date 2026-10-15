@@ -265,6 +265,7 @@ impl Walk {
                 .scope()
                 .min(self.level.coverage().scope().unwrap_or(ComputeScope::Cube)),
             self.parent.path.planes_per_cube(),
+            self.level.fillers(),
         ))
     }
 

@@ -650,7 +650,7 @@ impl Tile {
             level,
             storage,
             comptime!(None),
-            comptime!(StageOwner::Cube),
+            comptime!(StageOwner::CUBE),
         )
     }
 
@@ -725,7 +725,7 @@ impl Tile {
             comptime!(StageStorage::Strided),
             units,
             comptime!(Delivery::TMA_STAGE_ALIGNMENT),
-            comptime!(StageOwner::Cube),
+            comptime!(StageOwner::CUBE),
         )
         .nested_like(self)
     }
