@@ -29,6 +29,9 @@ pub struct GlobalOperand<T: Numeric> {
     pub coefficients: Coords<u32>,
     /// One signed value per [`Offset::Dynamic`](crate::Offset) axis.
     pub offsets: Coords<i32>,
+    /// The table a pool of pages is read as sequences through, where the spec states
+    /// [`paging`](TileSpec::paging).
+    pub(crate) paging: ComptimeOption<PageTable>,
 }
 
 #[cube]
@@ -45,6 +48,50 @@ impl<T: Numeric> GlobalOperand<T> {
             spec,
             Coords::<u32>::new(),
             Coords::<i32>::new(),
+            ComptimeOption::new_None(),
+        )
+    }
+
+    /// [`tensor`](GlobalOperand::tensor) over a pool of pages, read as the sequences `table` names
+    /// ([`Paging`]): the spec states which axes the table resolves, the tensor is the pool as it
+    /// lies, and the operand's extent along the two axes is the table's. A pool is never packed,
+    /// so `T` is `E`'s scalar.
+    pub fn paged<E: CubePrimitive>(
+        tensor: &Tensor<E>,
+        table: &Tensor<u32>,
+        #[comptime] space: Space,
+        #[comptime] spec: TileSpec,
+    ) -> GlobalOperand<T> {
+        let stored = elem_type_of::<E>();
+        let read = elem_type_of::<T>();
+        comptime!(assert!(
+            stored == read,
+            "GlobalOperand::paged: a pool of pages is read at the element it is bound at, \
+             {stored:?}, not {read:?}"
+        ));
+        let paging = comptime!(spec.paging.unwrap_or_else(|| panic!(
+            "GlobalOperand::paged: the spec states no paging for the table to resolve"
+        )));
+        let projection = comptime!(spec.projection.clone());
+        let (sequence_dim, _) = comptime!(
+            paging
+                .dims(&projection)
+                .unwrap_or_else(|refusal| panic!("GlobalOperand::paged: {refusal}"))
+        );
+        let table = PageTable::new(
+            table,
+            tensor.shape(sequence_dim) as u32,
+            paging,
+            projection,
+            tensor.vector_size(),
+        );
+        GlobalOperand::<T>::of_tensor::<E>(
+            tensor,
+            space,
+            spec,
+            Coords::<u32>::new(),
+            Coords::<i32>::new(),
+            ComptimeOption::new_Some(table),
         )
     }
 
@@ -57,7 +104,14 @@ impl<T: Numeric> GlobalOperand<T> {
         coefficients: Coords<u32>,
         offsets: Coords<i32>,
     ) -> GlobalOperand<T> {
-        GlobalOperand::<T>::of_tensor::<E>(tensor, space, spec, coefficients, offsets)
+        GlobalOperand::<T>::of_tensor::<E>(
+            tensor,
+            space,
+            spec,
+            coefficients,
+            offsets,
+            ComptimeOption::new_None(),
+        )
     }
 
     /// [`tensor`](GlobalOperand::tensor) where stored `E` may differ from served `T`
@@ -80,16 +134,19 @@ impl<T: Numeric> GlobalOperand<T> {
             spec,
             Coords::<u32>::new(),
             Coords::<i32>::new(),
+            ComptimeOption::new_None(),
         )
     }
 
-    /// The shared body: `E` is the binding element, `T` the served scalar.
+    /// The shared body: `E` is the binding element, `T` the served scalar, `paging` the table a
+    /// pool of pages is read through, which sets the operand's extent along its two axes.
     fn of_tensor<E: CubePrimitive>(
         tensor: &Tensor<E>,
         #[comptime] space: Space,
         #[comptime] spec: TileSpec,
         coefficients: Coords<u32>,
         offsets: Coords<i32>,
+        paging: ComptimeOption<PageTable>,
     ) -> GlobalOperand<T> {
         let rank = comptime!(spec.projection.physical_rank());
         let backing = Backing::<T>::new_Buffer(unsafe {
@@ -98,15 +155,22 @@ impl<T: Numeric> GlobalOperand<T> {
                 .downcast_unchecked::<T>()
                 .as_boxed_unchecked()
         });
+        let pool = RuntimeGeometry::of_tensor::<E>(tensor, rank);
+        #[comptime]
+        let geometry = match &paging {
+            ComptimeOption::Some(table) => table.sequences_over(&pool),
+            ComptimeOption::None => pool,
+        };
         GlobalOperand::<T> {
             backing,
-            geometry: RuntimeGeometry::of_tensor::<E>(tensor, rank),
+            geometry,
             bound_width: tensor.vector_size(),
             space,
             spec,
             write: comptime!(Write::Replace),
             coefficients,
             offsets,
+            paging,
         }
     }
 
@@ -136,6 +200,7 @@ impl<T: Numeric> GlobalOperand<T> {
             write,
             coefficients: Coords::<u32>::new(),
             offsets: Coords::<i32>::new(),
+            paging: ComptimeOption::new_None(),
         }
     }
 
@@ -162,6 +227,7 @@ impl<T: Numeric> GlobalOperand<T> {
             write: comptime!(Write::Replace),
             coefficients: Coords::<u32>::new(),
             offsets: Coords::<i32>::new(),
+            paging: ComptimeOption::new_None(),
         }
     }
 
@@ -183,6 +249,7 @@ impl<T: Numeric> Memory<T> {
     pub(crate) fn global(operand: GlobalOperand<T>) -> Memory<T> {
         let backing = operand.backing;
         let geometry = operand.geometry;
+        let paging = operand.paging;
         let coefficients = operand.coefficients;
         let offsets = operand.offsets;
         let bound_width = comptime!(operand.bound_width);
@@ -215,6 +282,11 @@ impl<T: Numeric> Memory<T> {
             coords.dynamic_offset_count()
         ));
         comptime!(check_operand(&space, &spec, vector_size));
+        comptime!(assert!(
+            paging.is_some() == spec.paging.is_some(),
+            "GlobalOperand: a spec stating paging is read through its table \
+             (GlobalOperand::paged), and only such a spec is"
+        ));
         // Gathered buffers have fewer physical axes than logical; storage-tiled ones have more.
         let rank = comptime!(projection.physical_rank());
         // The buffer read in loads: each dim's extent over what one load covers of it, every
@@ -272,6 +344,7 @@ impl<T: Numeric> Memory<T> {
                 physical_strides,
                 projection: gmem_projection,
                 rows: RowArrangement::InOrder,
+                paging,
             },
             window: Window::new(
                 origin,
@@ -316,6 +389,18 @@ fn check_operand(space: &Space, spec: &TileSpec, vector_size: usize) {
         panic!("{refusal}");
     }
     projection.validate_composition(|axis| space.extent(axis));
+    if let Some(paging) = &spec.paging {
+        let checked = paging.validate(
+            projection,
+            &spec.stored_tiles,
+            spec.packing,
+            spec.delivery,
+            vector_size,
+        );
+        if let Err(refusal) = checked {
+            panic!("GlobalOperand: {refusal}");
+        }
+    }
     let coord_rank = projection.coordinate_rank();
     assert!(
         spec.boundaries.is_empty() || spec.boundaries.len() == coord_rank,

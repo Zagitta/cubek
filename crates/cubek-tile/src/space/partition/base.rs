@@ -118,6 +118,20 @@ impl Partitioning {
                     "Partitioning::new: two levels distribute over {scope:?}"
                 );
             }
+            if level.plane_order().is_some() {
+                assert!(
+                    i == 0,
+                    "Partitioning::new: a plane level spanning the launch is the outermost level, \
+                     and this one sits {i} levels down"
+                );
+                assert!(
+                    levels.iter().all(|other| other.coverage()
+                        != Coverage::Distribute(ComputeScope::Cube)
+                        && other.fillers() == 0),
+                    "Partitioning::new: the launch's planes take the outermost level, so no cube \
+                     level groups them and no plane only fills a cube's stages"
+                );
+            }
         }
         Self { space, levels }
     }
@@ -278,6 +292,10 @@ impl Partitioning {
 
     /// The cube grid these levels distribute to.
     pub fn cube_count(&self) -> CubeCount {
+        if let Some(order) = self.levels.first().and_then(Level::plane_order) {
+            let (x, y) = order.grid(&self.levels[0], &self.space);
+            return CubeCount::Static(x as u32, y as u32, 1);
+        }
         CubeCount::Static(
             self.cube_instances(CubeAxis::X),
             self.cube_instances(CubeAxis::Y),
@@ -286,8 +304,11 @@ impl Partitioning {
     }
 
     /// Planes one cube holds: the levels' plane cuts, each plane group's planes, plus any that
-    /// only fill.
+    /// only fill; where the planes span the launch, the cubes their order groups them in.
     pub fn planes_per_cube(&self) -> u32 {
+        if let Some(order) = self.levels.first().and_then(Level::plane_order) {
+            return order.planes_per_cube() as u32;
+        }
         // `Levels` deals plane groups by one level, beside no plane level.
         let grouped = self.levels.iter().find_map(|level| {
             let scope = level.coverage().scope()?;

@@ -19,6 +19,7 @@ impl<T: Numeric> RegisterData<T> {
         #[comptime] out: Space,
     ) {
         let semiring = comptime!(self.accumulation.semiring("RegisterData::mma"));
+        register_block_size(self.vector_size);
         // A load stored across several columns reads as their runs along the contraction.
         let rhs_load = rhs.vector_tile();
         let vw = comptime!(rhs_load.run_length());
@@ -39,7 +40,7 @@ impl<T: Numeric> RegisterData<T> {
                 .contains(rhs.place.space.axis_at(rhs.place.space.rank() - 1))
         );
         comptime!(assert!(
-            lined_along_k == (fold > 1),
+            fold == if lined_along_k { vw } else { 1 },
             "RegisterData::mma: the block's lines hold {fold} partials of a cell but the rhs lines \
              along {}; open the block against the operands it contracts",
             if lined_along_k {
@@ -64,7 +65,7 @@ impl<T: Numeric> RegisterData<T> {
         let cols = comptime!(acc_axes.cols(&out));
         let lhs_axes =
             comptime!(MatrixAxes::new(&lhs.place.space, mr, kc).unwrap_or_else(|e| panic!("{e}")));
-        let rhs_axes = comptime!(if fold > 1 {
+        let rhs_axes = comptime!(if lined_along_k {
             MatrixAxes::new(&rhs.place.space, cols, kc).unwrap_or_else(|e| panic!("{e}"))
         } else {
             MatrixAxes::new(&rhs.place.space, kc, cols).unwrap_or_else(|e| panic!("{e}"))
@@ -102,6 +103,7 @@ impl<T: Numeric> RegisterData<T> {
             &mut self.data,
             lw,
             fold,
+            lined_along_k,
             comptime!(rhs_load.values() / vw),
             mr,
             nr,
@@ -119,15 +121,21 @@ impl<T: Numeric> RegisterData<T> {
     /// of its cells is a factor read in registers, and `rhs` is read one step of the contraction
     /// at a time. What an attention's unit does with the probabilities it just computed,
     /// contracting them with the values without leaving registers.
+    ///
+    /// Every cell of `lhs` is a whole value, whatever it folded: a block that summed runs of its
+    /// contraction into its cells is one value wide. This block's lines are neighbours along the
+    /// columns `rhs` is lined along.
     pub(crate) fn mma_block<EL: Numeric, ER: Numeric>(
         &mut self,
         lhs: &RegisterData<EL>,
         rhs: &Tile<ER>,
     ) {
         let semiring = comptime!(self.accumulation.semiring("RegisterData::mma_block"));
+        register_block_size(self.vector_size);
         comptime!(assert!(
-            lhs.fold == 1 && self.fold == 1,
-            "RegisterData::mma_block: both blocks hold whole cells, a line of neighbours"
+            self.fold == 1,
+            "RegisterData::mma_block: this block's lines are neighbours along the rhs's columns, \
+             not runs of its contraction"
         ));
         comptime!(assert!(
             lhs.mr == self.mr,
