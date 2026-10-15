@@ -5,7 +5,7 @@ use crate::multi_level::{
 use cubecl::{
     prelude::barrier::{copy_async, copy_async_checked},
     prelude::*,
-    std::tensor::{View, layout::Coords2d},
+    std::tensor::{View, ViewOperations, layout::Coords2d},
 };
 use cubek_std::MatrixLayout;
 
@@ -60,21 +60,32 @@ pub(crate) fn async_copy_from<EG: Scalar, NG: Size, ES: Numeric, NS: Size, T: Ti
 
     slice_len_global /= view.vector_size() as u32;
 
-    let global_slice = view.slice_unchecked(pos, slice_size);
-    let global_slice = global_slice.as_linear_slice();
-
     let type_size = Vector::<ES, NS>::size();
     let offset = swizzle.apply(stage_offset, type_size);
 
     let stage_slice = &mut stage_slice[offset as usize..(offset + slice_len_stage) as usize];
 
     if config.gmem_config.check_row_bounds || config.gmem_config.check_col_bounds {
+        let global_slice = view.slice_unchecked(pos, slice_size);
+        let global_slice = global_slice.as_linear_slice();
         copy_async_checked(
             &global_slice[0..slice_len_global as usize],
             stage_slice.downcast_mut(),
             copy_vector_size,
         );
     } else {
+        // In bounds by construction: take the source range straight from the view's
+        // layout. `slice_unchecked` + `as_linear_slice` clamp the position and size
+        // against the view shape on every call, which costs several integer min/max
+        // and subtractions per copy in the hot loop.
+        let last = match config.smem_config.matrix_layout {
+            MatrixLayout::RowMajor => (pos.0, pos.1 + copy_vector_size - 1),
+            MatrixLayout::ColMajor => (pos.0 + copy_vector_size - 1, pos.1),
+        };
+        let global_slice = <View<Vector<EG, NG>, Coords2d> as ViewOperations<
+            Vector<EG, NG>,
+            Coords2d,
+        >>::as_linear_slice(&view, pos, last);
         copy_async(global_slice, stage_slice.downcast_mut(), copy_vector_size);
     }
 }
