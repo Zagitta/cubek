@@ -61,36 +61,66 @@ pub(crate) fn block_scaled_definition<CD: Numeric>(
     )
 }
 
-/// Whether `src`, packed `e2m1` values under one level of scales loaded into a fragment of `T`,
-/// contracts through the device's block-scaled instruction of `m × n × k`: the instruction offered
-/// for `e2m1` operands under `e4m3` scales, the scales one every [`E2M1_SCALE_BLOCK`] values of
-/// `k`, and a fragment holding the codes as stored. A fragment of a 16-bit float decodes them
-/// instead, and any other source reads through the decoding landing.
+/// Refuses `src`, loaded into a fragment of `T`, as an operand of the device's block-scaled
+/// instruction of `m × n × k` ([`MmaOperands::BlockScaled`]) unless it is one: packed `e2m1` values
+/// in shared memory under one level of scales, one every [`E2M1_SCALE_BLOCK`] values of `k`, served
+/// as stored, on a device that offers the instruction.
 ///
 /// What the instruction takes is NVFP4: the leaf reads each block's scale at its first value and
 /// hands it over as `e4m3`, so the scales must cover sixteen values of `k` or a multiple of
 /// sixteen, each exact in `e4m3`. A per-tensor factor above them is the product's to apply: the
 /// instruction holds one level.
 #[cube]
-pub(crate) fn block_scales_here<T: Numeric>(
+pub(crate) fn assert_block_scaled<T: Numeric>(
     src: &Tile,
     #[comptime] m: usize,
     #[comptime] n: usize,
     #[comptime] k: usize,
-) -> comptime_type!(bool) {
+) {
     let packing = src.packing();
     let shared = src.is_shared();
-    let one_level = src.factor_levels();
-    let e2m1 = comptime!(matches!(
-        packing,
-        Packing::Packed {
-            field: Field::Quant(QuantValue::E2M1) | Field::ConvertedE2M1
-        }
-    ));
-    let blocks = comptime!(k.is_multiple_of(E2M1_SCALE_BLOCK));
+    let levels = src.factor_levels();
     let offered = offers_block_scaled(m, n, k);
     let as_stored = served_as_stored::<T>();
-    comptime!(e2m1 && shared && one_level == 1 && blocks && offered && as_stored)
+    comptime!({
+        let e2m1 = matches!(
+            packing,
+            Packing::Packed {
+                field: Field::Quant(QuantValue::E2M1) | Field::ConvertedE2M1
+            }
+        );
+        let refusal = if !offered {
+            Some(format!(
+                "the device offers no block-scaled instruction of {m}x{n}x{k}"
+            ))
+        } else if !e2m1 {
+            Some(format!(
+                "the operand is stored as {packing:?}, not packed e2m1 values"
+            ))
+        } else if !as_stored {
+            Some(
+                "the operand is served at a 16-bit float, which a fragment decodes the codes into \
+                 as it loads; state the instruction's operands `MmaOperands::Plain`"
+                    .to_string(),
+            )
+        } else if !shared {
+            Some("the operand is not in shared memory; stage it as stored".to_string())
+        } else if levels != 1 {
+            Some(format!(
+                "the operand carries {levels} levels of scales and the instruction reads one; \
+                 take the coarser ones out for the sum (`Tile::factor`)"
+            ))
+        } else if !k.is_multiple_of(E2M1_SCALE_BLOCK) {
+            Some(format!(
+                "a depth of {k} is not whole blocks of {E2M1_SCALE_BLOCK}"
+            ))
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            panic!("MmaOperands::BlockScaled: {refusal}");
+        }
+    });
 }
 
 /// Whether a fragment of `T` holds the codes as they are stored, which the block-scaled
@@ -106,21 +136,6 @@ fn served_as_stored<T: Numeric>() -> comptime_type!(bool) {
             ElemType::Float(FloatKind::F16 | FloatKind::BF16 | FloatKind::F32 | FloatKind::TF32)
         )
     })
-}
-
-/// Whether both `lhs` and `rhs` contract through the device's block-scaled instruction of
-/// `m × n × k` ([`block_scales_here`]): the instruction takes both or neither.
-#[cube]
-pub(crate) fn contracts_block_scaled<L: Numeric, R: Numeric>(
-    lhs: &Tile,
-    rhs: &Tile,
-    #[comptime] m: usize,
-    #[comptime] n: usize,
-    #[comptime] k: usize,
-) -> comptime_type!(bool) {
-    let lhs_scaled = block_scales_here::<L>(lhs, m, n, k);
-    let rhs_scaled = block_scales_here::<R>(rhs, m, n, k);
-    comptime!(lhs_scaled && rhs_scaled)
 }
 
 /// Whether the device offers the block-scaled instruction of `m × n × k` over `e2m1` operands
