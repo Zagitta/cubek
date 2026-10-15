@@ -163,7 +163,9 @@ fn load_e2m1_weight<T: Numeric, N: Size>(
         codes[l] = words.read(load.index(&at, &space));
     }
     let scale_words = comptime!(k / (E2M1_SCALE_BLOCK * SCALES_PER_WORD));
-    let mut scales = Array::<u32>::new(scale_words);
+    // Each word's four scales converted at once, the device's pair conversion taking two a
+    // call, rather than a field selected and converted for every step it serves.
+    let mut scales = Array::<Vector<T, Const<4>>>::new(scale_words);
     #[unroll]
     for w in 0..scale_words {
         let at = TileMatrix::value_coords(
@@ -174,13 +176,13 @@ fn load_e2m1_weight<T: Numeric, N: Size>(
             axes,
             1usize,
         );
-        scales[w] = factor.word_at(&at, comptime!(space.clone()));
+        let word = factor.word_at(&at, comptime!(space.clone()));
+        scales[w] = Vector::<T, Const<4>>::cast_from(Vector::<e4m3, Const<4>>::reinterpret(word));
     }
 
     #[unroll]
     for s in 0..comptime!(k / E2M1_SCALE_BLOCK) {
-        let fields = Vector::<e4m3, Const<4>>::reinterpret(scales[comptime!(s / SCALES_PER_WORD)]);
-        let scale = T::cast_from(fields.extract(comptime!(s % SCALES_PER_WORD)));
+        let scale = scales[comptime!(s / SCALES_PER_WORD)].extract(comptime!(s % SCALES_PER_WORD));
         #[unroll]
         for i in 0..2usize {
             let word = comptime!(2 * s + i);
