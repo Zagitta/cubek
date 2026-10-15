@@ -470,16 +470,16 @@ fn a_paged_read_of_steps_within_a_page_reads_each_sequence_through_its_table() {
 }
 
 /// The table sets the operand's extent, not the launch: a table of fewer rows or narrower rows
-/// than the launch walks reads zero past them, and an empty one reads zero throughout. That no
-/// load lands past the table is the guard in `PageTable::resolve`'s doing, which values cannot
-/// show: the mask drops whatever such a load returns.
+/// than the launch walks reads zero past them, down to a table of one entry. That no load lands
+/// past the table is `PageTable::lookup`'s clamp, which values cannot show: the mask drops
+/// whatever such a load returns.
 #[test]
 fn a_paged_read_past_the_table_reads_zero() {
     let lens = [6, 5, 4];
     for pages in [
         rows(&PAGES[..2]),
         PAGES.iter().map(|row| row[..2].to_vec()).collect(),
-        Vec::new(),
+        vec![vec![PAGES[0][0]]],
     ] {
         let got = run_paged_read_over(&lens, &pages);
         let want = expected_paged_read_over(&lens, &pages);
