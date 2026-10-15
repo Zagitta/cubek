@@ -26,6 +26,11 @@ pub(crate) struct FactorLevel {
     /// byte, as an NVFP4 checkpoint packs them. Only that instruction reads such a level
     /// ([`FactorExpand::__expand_word_at_method`]); widened to a scale it means nothing.
     pub(crate) words: bool,
+    /// Whether a stage of the values keeps these scales beside them, the values staged as they
+    /// are stored and scaled where they are read, rather than decoded into the stage: always for
+    /// words of block scales, which only the block-scaled instruction reads; on request for scales
+    /// a reader of the stored values applies itself ([`Tile::mul_beside`](crate::Tile::mul_beside)).
+    pub(crate) beside: bool,
     /// How the scales sit in their buffer: what says whether a scale times a value it scales is
     /// exact in a 16-bit float ([`lane_runs_refusal`](crate::tile::kind::plane::mma::lane_runs_refusal)).
     pub(crate) stored: Packing,
@@ -182,13 +187,16 @@ impl Factor {
 }
 
 impl FactorExpand {
-    /// A factor of one level: `scale`, read at the values' coordinates.
-    pub(crate) fn of<S: Numeric>(scope: &Scope, scale: &TileExpand<S>) -> Self {
+    /// A factor of one level: `scale`, read at the values' coordinates, kept beside the values a
+    /// stage holds where `beside` asks it or it holds words of block scales.
+    pub(crate) fn of<S: Numeric>(scope: &Scope, scale: &TileExpand<S>, beside: bool) -> Self {
+        let words = S::elem_type(scope) == u32::elem_type(scope);
         FactorExpand {
             levels: vec![FactorLevel {
                 space: scale.place.space.clone(),
                 projection: scale.clone().__expand_projection_method(scope),
-                words: S::elem_type(scope) == u32::elem_type(scope),
+                words,
+                beside: beside || words,
                 stored: scale.clone().__expand_packing_method(scope),
                 read: Arc::new(scale.clone()),
             }],
@@ -241,6 +249,7 @@ impl FactorExpand {
                     space: level.space.clone(),
                     projection: level.projection.clone(),
                     words: level.words,
+                    beside: level.beside,
                     stored: level.stored,
                 })
                 .collect(),
@@ -278,16 +287,16 @@ impl FactorExpand {
     }
 
     /// Whether these scales are staged beside the values they scale rather than decoded into
-    /// them: words of block scales, which only the block-scaled instruction reads, so values
-    /// under them are staged as they are stored. Only one level is: the instruction holds one.
+    /// them ([`FactorLevel::beside`]), so values under them are staged as they are stored. Only
+    /// one level is: the reader of the stored values applies one.
     pub(crate) fn staged_beside(&self) -> bool {
-        let words = self.inner().is_some_and(|level| level.words);
+        let beside = self.inner().is_some_and(|level| level.beside);
         assert!(
-            !words || self.levels.len() == 1,
-            "Factor: values under words of block scales carry no other level, since the \
-             block-scaled instruction that reads them holds one; apply a coarser factor to the sum"
+            !beside || self.levels.len() == 1,
+            "Factor: values whose scales a stage keeps beside them carry no other level, since \
+             the reader of the stored values applies one; apply a coarser factor to the sum"
         );
-        words
+        beside
     }
 
     /// This factor's stage as `spec` shapes the values': each level's scales staged beside them.

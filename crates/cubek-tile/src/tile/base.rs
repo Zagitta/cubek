@@ -1036,6 +1036,15 @@ impl<E: Numeric> Tile<E> {
         unexpanded!()
     }
 
+    /// These values under `scale`, as [`mul`](Tile::mul), with a stage of them keeping the
+    /// values as they are stored and `scale` beside them, rather than the values decoded: what a
+    /// reader that decodes and scales the stored values itself, a fragment loading `e2m1` codes in
+    /// lane runs, takes out of shared memory, a stage a quarter of the 16-bit values' bytes. The
+    /// only level of scales the values carry.
+    pub fn mul_beside<S: Numeric>(&self, _scale: &Tile<S>) -> Tile<E> {
+        unexpanded!()
+    }
+
     /// The factor a leaf reads these values under.
     pub(crate) fn reader(
         &self,
@@ -1131,6 +1140,24 @@ impl<E: Numeric> TileExpand<E> {
         scope: &Scope,
         scale: &TileExpand<S>,
     ) -> TileExpand<E> {
+        self.scaled_by(scope, scale, false)
+    }
+
+    pub fn __expand_mul_beside_method<S: Numeric>(
+        &self,
+        scope: &Scope,
+        scale: &TileExpand<S>,
+    ) -> TileExpand<E> {
+        self.scaled_by(scope, scale, true)
+    }
+
+    /// [`mul`](Tile::mul), its scales kept beside the values a stage holds where `beside` asks.
+    fn scaled_by<S: Numeric>(
+        &self,
+        scope: &Scope,
+        scale: &TileExpand<S>,
+        beside: bool,
+    ) -> TileExpand<E> {
         let values = self.place.space.clone();
         let scales = scale.place.space.clone();
         assert!(
@@ -1143,10 +1170,10 @@ impl<E: Numeric> TileExpand<E> {
         let mut out = self.clone();
         match &mut out.kind {
             TileKindExpand::Memory(memory) => {
-                memory.factor = memory.factor.and(FactorExpand::of(scope, scale));
+                memory.factor = memory.factor.and(FactorExpand::of(scope, scale, beside));
             }
             TileKindExpand::TmaGmem(tma) => {
-                let factor = tma.factor.and(FactorExpand::of(scope, scale));
+                let factor = tma.factor.and(FactorExpand::of(scope, scale, beside));
                 assert!(
                     factor.staged_beside(),
                     "Tile::mul: a tma source lands its values as they lie, so it rides only scales \
