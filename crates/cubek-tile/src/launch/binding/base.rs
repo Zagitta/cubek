@@ -162,7 +162,8 @@ impl<'a> Arg<'a, Labelled> {
     /// along both axes, so a read the launch keeps in bounds is in bounds through the table: the
     /// two axes are checked only where the launch overhangs, as a buffer read where it lies is.
     /// A table that stops short reads its clamped entries there: other positions of the pool,
-    /// never past it.
+    /// never past it. Where the launch overhangs a table axis its lines run along, wider than
+    /// one, the binding is refused ([`Refusal::UncheckableVectorEdge`]), not checked line by line.
     pub fn paged_covering(self, sequence: Axis, position: Axis) -> Self {
         self.paged_as(PagedPool {
             sequence,

@@ -100,6 +100,7 @@ pub(crate) enum Spans {
 
 /// A page table as a kernel reads it: `u32`, `[sequences, pages_per_sequence]`, read by stride.
 /// Its shape is the operand's: the sequences it lists and their positions, `page_size` a column.
+/// It holds at least one entry, which [`lookup`](Self::lookup) reads for every window.
 #[derive(CubeType, Clone)]
 #[expand(derive(Clone))]
 pub(crate) struct PageTable {
