@@ -9,8 +9,7 @@
 //! included. The pool is bound as it lies; the operand's extents along the two axes are the
 //! table's, read off it at launch, so nothing states them twice. A coordinate past the table reads
 //! the pool's first page, and a table entry past the pool its last: a table is device data a
-//! launch may never have written. A table holds at least one entry: one is read for every window,
-//! without a branch, so a launch over no sequences or no positions is the caller's to skip.
+//! launch may never have written.
 //!
 //! The table is read as each window is cut, not as each line is: a window pins the page its origin
 //! lies in, and one whose extent is a single sequence and at most a page of positions the next page
@@ -125,8 +124,7 @@ pub(crate) struct PageTable {
     next_page: u32,
     /// Where the pin's column starts, in positions.
     pin_start: u32,
-    /// What a line of the pinned page, or of the next, adds to its offset read as if the pool were
-    /// one sequence: its page's start, less its column's ([`based`](Self::based)).
+    /// What a line of the pinned page, or the next, adds to its offset as one sequence's.
     pin_base: u32,
     next_base: u32,
     /// What the window's extent proves of the pages its lines lie in.
@@ -212,6 +210,8 @@ impl PageTable {
         &self,
         origin: &Coords<i32>,
         #[comptime] edges: Option<Vec<Option<usize>>>,
+        sequence_stride: u32,
+        position_stride: u32,
     ) -> PageTable {
         let page_size = comptime!(self.page_size as u32);
         let unit = comptime!(self.unit as u32);
@@ -230,7 +230,19 @@ impl PageTable {
             .at(comptime!(self.position_dim))
             .cast::<u32>()
             .times(unit);
-        self.pinned(sequence, position.divided_by(page_size), spans)
+        let mut table = self.pinned(sequence, position.divided_by(page_size), spans);
+        // Wrapping: a base is only ever added to the offset of a line past its column's start.
+        let start = table.pin_start.divided_by(unit);
+        let page_digits = comptime!((self.page_size / self.unit) as u32);
+        table.pin_base = table
+            .pin_page
+            .times(sequence_stride)
+            .minus(start.times(position_stride));
+        table.next_base = table
+            .next_page
+            .times(sequence_stride)
+            .minus(start.plus(page_digits).times(position_stride));
+        table
     }
 
     /// This table pinned at the page column `column` of sequence `sequence` lists.
@@ -261,53 +273,29 @@ impl PageTable {
         }
     }
 
-    /// This table with the bases of its pinned page and the next, the pool's strides along the
-    /// sequence dim and the position dim being `sequence_stride` and `position_stride`.
-    pub(crate) fn based(&self, sequence_stride: u32, position_stride: u32) -> PageTable {
-        let unit = comptime!(self.unit as u32);
-        let page_digits = comptime!((self.page_size / self.unit) as u32);
-        let start = self.pin_start.divided_by(unit);
-        let mut table = self.clone();
-        // Wrapping: a base is only ever added to the offset of a line past its column's start.
-        table.pin_base = self
-            .pin_page
-            .times(sequence_stride)
-            .minus(start.times(position_stride));
-        table.next_base = self
-            .next_page
-            .times(sequence_stride)
-            .minus(start.plus(page_digits).times(position_stride));
-        table
-    }
-
     /// Where line `digits` lies, as digits and a base its offset adds past them: a window of at
-    /// most two pages keeps the digits of one sequence, so its lines' offsets stay affine, and
-    /// adds its page's base; any other is resolved line by line.
+    /// most two pages keeps one sequence's digits, so its lines' offsets stay affine, and adds its
+    /// page's base; any other is resolved line by line.
     pub(crate) fn located(&self, digits: &Coords<u32>) -> (Coords<u32>, u32) {
         match comptime!(self.spans) {
-            Spans::TwoPages => self.rebased(digits),
+            Spans::TwoPages => {
+                let page_size = comptime!(self.page_size as u32);
+                let unit = comptime!(self.unit as u32);
+                let position = digits.at(comptime!(self.position_dim)).times(unit);
+                let pinned = position.minus(self.pin_start) < page_size;
+                let mut kept = Coords::<u32>::new();
+                #[unroll]
+                for pa in 0..digits.len() {
+                    if comptime!(pa == self.sequence_dim) {
+                        kept.push(0u32);
+                    } else {
+                        kept.push(digits.at(pa));
+                    }
+                }
+                (kept, select(pinned, self.pin_base, self.next_base))
+            }
             Spans::Any => (self.resolve(digits), 0u32),
         }
-    }
-
-    /// `digits` with the sequence's digit cleared, the position's kept, and the base its page adds:
-    /// the pinned page's where the line lies in its column, else the next's.
-    fn rebased(&self, digits: &Coords<u32>) -> (Coords<u32>, u32) {
-        let page_size = comptime!(self.page_size as u32);
-        let unit = comptime!(self.unit as u32);
-        let position = digits.at(comptime!(self.position_dim)).times(unit);
-        let pinned = position.minus(self.pin_start) < page_size;
-        let base = select(pinned, self.pin_base, self.next_base);
-        let mut kept = Coords::<u32>::new();
-        #[unroll]
-        for pa in 0..digits.len() {
-            if comptime!(pa == self.sequence_dim) {
-                kept.push(0u32);
-            } else {
-                kept.push(digits.at(pa));
-            }
-        }
-        (kept, base)
     }
 
     /// The page column `column` of sequence `sequence` lists, clamped to the pool.
@@ -315,9 +303,8 @@ impl PageTable {
     /// A coordinate outside the table, which only a masked read asks for before the mask drops
     /// it, reads the pool's first page and never loads past the table.
     fn lookup(&self, sequence: u32, column: u32) -> u32 {
-        // No branch: one inside the walk keeps a window's reads from scheduling around the load,
-        // which cost a decode walk a third of its time. The coordinate is clamped into the table,
-        // which holds an entry, and the entry dropped where it was outside.
+        // No branch, so a window's reads schedule around the load: the coordinate is clamped
+        // into the table, which holds an entry, and the entry dropped where it was outside.
         let inside = sequence < self.sequences && column < self.pages_per_sequence;
         let at = sequence
             .min_with(self.sequences.max_with(1u32).minus(1u32))

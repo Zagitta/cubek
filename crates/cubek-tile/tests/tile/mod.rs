@@ -22,7 +22,6 @@ mod matmul;
 mod online_softmax;
 mod packed;
 mod paged;
-mod paged_probe;
 mod procedural;
 pub(crate) mod quant;
 mod ragged;

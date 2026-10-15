@@ -145,13 +145,12 @@ impl BufferLayout {
                 physical_strides: self.physical_strides.clone(),
                 projection: comptime!(self.projection.clone()),
                 rows: comptime!(self.rows),
-                paging: ComptimeOption::new_Some({
-                    let pinned = table.pinned_at(origin, edges);
-                    pinned.based(
-                        self.physical_strides.at(comptime!(pinned.sequence_dim)),
-                        self.physical_strides.at(comptime!(pinned.position_dim)),
-                    )
-                }),
+                paging: ComptimeOption::new_Some(table.pinned_at(
+                    origin,
+                    edges,
+                    self.physical_strides.at(comptime!(table.sequence_dim)),
+                    self.physical_strides.at(comptime!(table.position_dim)),
+                )),
             },
             ComptimeOption::None => self.clone(),
         }
