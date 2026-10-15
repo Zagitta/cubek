@@ -65,6 +65,8 @@ pub(crate) fn block_scaled_definition<CD: Numeric>(
 /// instruction of `m × n × k` ([`MmaOperands::BlockScaled`]) unless it is one: packed `e2m1` values
 /// in shared memory under one level of scales, one every [`E2M1_SCALE_BLOCK`] values of `k`, served
 /// as stored, on a device that offers the instruction.
+/// A fragment already loaded passes: it was refused or admitted as it loaded, and holds the
+/// instruction's registers rather than the values it loaded them from.
 ///
 /// What the instruction takes is NVFP4: the leaf reads each block's scale at its first value and
 /// hands it over as `e4m3`, so the scales must cover sixteen values of `k` or a multiple of
@@ -72,6 +74,24 @@ pub(crate) fn block_scaled_definition<CD: Numeric>(
 /// instruction holds one level.
 #[cube]
 pub(crate) fn assert_block_scaled<T: Numeric>(
+    src: &Tile,
+    #[comptime] m: usize,
+    #[comptime] n: usize,
+    #[comptime] k: usize,
+) {
+    match &src.kind {
+        TileKind::PlaneTile(_) => {}
+        TileKind::Memory(_)
+        | TileKind::TmaGmem(_)
+        | TileKind::Procedural(_)
+        | TileKind::Lines(_)
+        | TileKind::PlanePartition(_) => refuse_unless_block_scaled::<T>(src, m, n, k),
+    }
+}
+
+/// [`assert_block_scaled`] of an operand still in memory.
+#[cube]
+fn refuse_unless_block_scaled<T: Numeric>(
     src: &Tile,
     #[comptime] m: usize,
     #[comptime] n: usize,
